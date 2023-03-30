@@ -11,7 +11,7 @@
 %>
 
 <%= render "results" %>
-<%= form_tag import_path(@abstract_model), :multipart => true, class: 'form-horizontal denser', data: { turbo: false } do %>
+<%= form_tag import_path(@abstract_model), :multipart => true, class: 'form-horizontal denser', data: { turbo: false }, id: 'import-form' do %>
   <input name="send_data" type="hidden" value="true">/</input>
   <fieldset>
     <legend>
@@ -100,3 +100,13 @@
     </button>
   </div>
 <% end %>
+
+<script>
+  const $form = document.getElementById('import-form');
+  $form.addEventListener('submit', function(e) {
+    const $submitButton = $form.querySelector('button[type="submit"]');
+    $submitButton.disabled = true;
+    $submitButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading...';
+  });
+</script>
+
