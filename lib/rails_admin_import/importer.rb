@@ -19,16 +19,17 @@ module RailsAdminImport
         if records.count > RailsAdminImport.config.line_item_limit
           return results = {
             success: [],
-            error: [I18n.t('admin.import.import_error.line_item_limit', limit: RailsAdminImport.config.line_item_limit)]
+            error: [I18n.t("admin.import.import_error.line_item_limit", limit: RailsAdminImport.config.line_item_limit)]
           }
         end
 
         perform_global_callback(:before_import)
 
         with_transaction do
-          records.each do |record|
+          # Skip the header row
+          records.each.with_index(1) do |record, index|
             catch :skip do
-              import_record(record)
+              import_record(record, index)
             end
           end
 
@@ -69,9 +70,9 @@ module RailsAdminImport
       end
     end
 
-    def import_record(record)
+    def import_record(record, row_number)
       if params["file"] && RailsAdminImport.config.pass_filename
-        record.merge!({:filename_importer => params[:file].original_filename})
+        record.merge!({ :filename_importer => params[:file].original_filename })
       end
 
       perform_model_callback(import_model.model, :before_import_find, record)
@@ -90,7 +91,7 @@ module RailsAdminImport
         import_many_association_data(object, record)
       rescue AssociationNotFound => e
         error = I18n.t("admin.import.association_not_found", :error => e.to_s)
-        report_error(object, action, error)
+        report_error(object, action, error, row_number)
         perform_model_callback(object, :after_import_association_error, record)
         return
       end
@@ -101,7 +102,9 @@ module RailsAdminImport
         report_success(object, action)
         perform_model_callback(object, :after_import_save, record)
       else
-        report_error(object, action, object.errors.full_messages.join(", "))
+        # Report the error and row / column
+        message = object.errors.full_messages.join(", ")
+        report_error(object, action, message, row_number)
         perform_model_callback(object, :after_import_error, record)
       end
     end
@@ -126,11 +129,11 @@ module RailsAdminImport
       results[:success] << message
     end
 
-    def report_error(object, action, error)
+    def report_error(object, action, error, row_number = nil)
       object_label = import_model.label_for_model(object)
       message = I18n.t("admin.import.import_error.#{action}",
                        :name => object_label,
-                       :error => error)
+                       :error => row_number ? "#{error} (row #{row_number})" : error)
       logger.info "#{Time.now}: #{message}"
       results[:error] << message
     end
