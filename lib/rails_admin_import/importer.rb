@@ -3,58 +3,61 @@ require "rails_admin_import/import_logger"
 module RailsAdminImport
   class Importer
     def initialize(import_model, params)
+      @current_row = 0
       @import_model = import_model
       @params = params
     end
 
     attr_reader :import_model, :params
 
-    class UpdateLookupError < StandardError
-    end
+    class UpdateLookupError < StandardError; end
 
     def import(records)
-      begin
-        init_results
+      init_results
 
-        if records.count > RailsAdminImport.config.line_item_limit
-          return results = {
-            success: [],
-            error: [I18n.t("admin.import.import_error.line_item_limit", limit: RailsAdminImport.config.line_item_limit)]
-          }
-        end
-
-        perform_global_callback(:before_import)
-
-        with_transaction do
-          # Skip the header row
-          records.each.with_index(1) do |record, index|
-            catch :skip do
-              import_record(record, index)
-            end
-          end
-
-          rollback_if_error
-        end
-
-        perform_global_callback(:after_import)
-      rescue Exception => e
-        report_general_error("#{e} (#{e.backtrace.first})")
+      if records.count > RailsAdminImport.config.line_item_limit
+        return results = {
+          success: [],
+          error: [I18n.t("admin.import.import_error.line_item_limit", limit: RailsAdminImport.config.line_item_limit)]
+        }
       end
 
+      perform_global_callback(:before_import)
+
+      with_transaction do
+        # Skip the header row
+        records.each.with_index(2) do |record, index|
+          begin
+            @current_row = index
+            catch :skip do
+              begin
+                import_record(record)
+              rescue Exception => e
+                # Log the error but do not stop the loop
+                report_general_error("#{e} (#{e.backtrace.first})")
+              end
+            end
+          ensure
+            @current_row = index
+          end
+        end
+
+        rollback_if_error # Check errors and possibly rollback after all records have been processed
+      end
+
+      perform_global_callback(:after_import)
       format_results
     end
 
     private
 
     def init_results
-      @results = { :success => [], :error => [] }
+      @results = { success: [], error: [] }
     end
 
     def with_transaction(&block)
-      if RailsAdminImport.config.rollback_on_error &&
-        defined?(ActiveRecord)
-
-        ActiveRecord::Base.transaction &block
+      if RailsAdminImport.config.rollback_on_error && defined?(ActiveRecord)
+        ActiveRecord::Base.transaction(&block)
       else
         block.call
       end
@@ -62,17 +65,17 @@ module RailsAdminImport
 
     def rollback_if_error
       if RailsAdminImport.config.rollback_on_error &&
-        defined?(ActiveRecord) &&
-        !results[:error].empty?
+         defined?(ActiveRecord) &&
+         !results[:error].empty?
 
         results[:success] = []
         raise ActiveRecord::Rollback
       end
     end
 
-    def import_record(record, row_number)
+    def import_record(record)
       if params["file"] && RailsAdminImport.config.pass_filename
-        record.merge!({ :filename_importer => params[:file].original_filename })
+        record.merge!({ filename_importer: params[:file].original_filename })
       end
 
       perform_model_callback(import_model.model, :before_import_find, record)
@@ -90,8 +93,8 @@ module RailsAdminImport
         import_single_association_data(object, record)
         import_many_association_data(object, record)
       rescue AssociationNotFound => e
-        error = I18n.t("admin.import.association_not_found", :error => e.to_s)
-        report_error(object, action, error, row_number)
+        error = I18n.t("admin.import.association_not_found", error: e.to_s)
+        report_error(object, action, error)
         perform_model_callback(object, :after_import_association_error, record)
         return
       end
@@ -102,9 +105,8 @@ module RailsAdminImport
         report_success(object, action)
         perform_model_callback(object, :after_import_save, record)
       else
-        # Report the error and row / column
         message = object.errors.full_messages.join(", ")
-        report_error(object, action, message, row_number)
+        report_error(object, action, message)
         perform_model_callback(object, :after_import_error, record)
       end
     end
@@ -123,23 +125,20 @@ module RailsAdminImport
 
     def report_success(object, action)
       object_label = import_model.label_for_model(object)
-      message = I18n.t("admin.import.import_success.#{action}",
-                       :name => object_label)
+      message = I18n.t("admin.import.import_success.#{action}", name: object_label)
       logger.info "#{Time.now}: #{message}"
       results[:success] << message
     end
 
-    def report_error(object, action, error, row_number = nil)
+    def report_error(object, action, error)
       object_label = import_model.label_for_model(object)
-      message = I18n.t("admin.import.import_error.#{action}",
-                       :name => object_label,
-                       :error => row_number ? "#{error} (row #{row_number})" : error)
+      message = I18n.t("admin.import.import_error.#{action}", name: object_label, error: @current_row ? "#{error} (row #{@current_row})" : error)
       logger.info "#{Time.now}: #{message}"
       results[:error] << message
     end
 
     def report_general_error(error)
-      message = I18n.t("admin.import.import_error.general", :error => error)
+      message = I18n.t("admin.import.import_error.general", error: @current_row ? "#{error} (row #{@current_row})" : error)
       logger.info "#{Time.now}: #{message}"
       results[:error] << message
     end
@@ -159,9 +158,7 @@ module RailsAdminImport
 
     def format_result_message(type, array)
       result_count = "#{array.size} #{import_model.display_name.pluralize(array.size)}"
-      I18n.t("admin.flash.#{type}",
-             name: result_count,
-               action: I18n.t("admin.actions.import.done"))
+      I18n.t("admin.flash.#{type}", name: result_count, action: I18n.t("admin.actions.import.done"))
     end
 
     def perform_model_callback(object, method_name, record)
@@ -179,9 +176,7 @@ module RailsAdminImport
 
     def report_old_import_hook(method_name)
       unless @old_import_hook_reported
-        error = I18n.t("admin.import.import_error.old_import_hook",
-                       model: import_model.display_name,
-                       method: method_name)
+        error = I18n.t("admin.import.import_error.old_import_hook", model: import_model.display_name, method: method_name)
         report_general_error(error)
         @old_import_hook_reported = true
       end
@@ -195,15 +190,13 @@ module RailsAdminImport
     def find_or_create_object(record, update)
       model = import_model.model
       object = if update.present?
-                 query = update.each_with_object({}) do
-                   |field, query| query[field] = record[field]
+                 query = update.each_with_object({}) do |field, query|
+                   query[field] = record[field]
                  end
                  model.where(query).first
                end
 
-      if object.nil?
-        object = model.new
-      end
+      object ||= model.new
 
       perform_model_callback(object, :before_import_attributes, record)
 
@@ -226,33 +219,27 @@ module RailsAdminImport
         value = extract_mapping(record[field.name], mapping_key)
 
         if !value.blank?
-          object.send "#{field.name}=", import_model.associated_object(field, mapping_key, value)
+          object.send("#{field.name}=", import_model.associated_object(field, mapping_key, value))
         end
       end
     end
 
     def import_many_association_data(object, record)
       import_model.many_association_fields.each do |field|
-        if record.has_key? field.name
+        if record.key?(field.name)
           mapping_key = params[:associations][field.name]
-          values = record[field.name].reject { |value| value.blank? }.map { |value|
-            extract_mapping(value, mapping_key)
-          }
+          values = record[field.name].reject(&:blank?).map { |value| extract_mapping(value, mapping_key) }
 
-          if !values.empty?
+          if values.any?
             associated = values.map { |value| import_model.associated_object(field, mapping_key, value) }
-            object.send "#{field.name}=", associated
+            object.send("#{field.name}=", associated)
           end
         end
       end
     end
 
     def extract_mapping(value, mapping_key)
-      if value.is_a? Hash
-        value[mapping_key]
-      else
-        value
-      end
+      value.is_a?(Hash) ? value[mapping_key] : value
     end
   end
 end
