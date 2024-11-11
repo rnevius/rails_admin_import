@@ -6,6 +6,7 @@ module RailsAdminImport
       @current_row = 0
       @import_model = import_model
       @params = params
+      @fuzzy_matches = []
     end
 
     attr_reader :import_model, :params
@@ -18,6 +19,7 @@ module RailsAdminImport
       if records.count > RailsAdminImport.config.line_item_limit
         return results = {
           success: [],
+          warning: [],
           error: [I18n.t("admin.import.import_error.line_item_limit", limit: RailsAdminImport.config.line_item_limit)]
         }
       end
@@ -42,7 +44,7 @@ module RailsAdminImport
           end
         end
 
-        rollback_if_error # Check errors and possibly rollback after all records have been processed
+        rollback_if_error_or_warning # Check errors and possibly rollback after all records have been processed
       end
 
       perform_global_callback(:after_import)
@@ -52,7 +54,7 @@ module RailsAdminImport
     private
 
     def init_results
-      @results = { success: [], error: [] }
+      @results = { success: [], error: [], warning: [] }
     end
 
     def with_transaction(&block)
@@ -63,10 +65,10 @@ module RailsAdminImport
       end
     end
 
-    def rollback_if_error
+    def rollback_if_error_or_warning
       if RailsAdminImport.config.rollback_on_error &&
          defined?(ActiveRecord) &&
-         !results[:error].empty?
+         (results[:error].any? || results[:warning].any?)
 
         results[:success] = []
         raise ActiveRecord::Rollback
@@ -87,6 +89,16 @@ module RailsAdminImport
       object = find_or_create_object(record, update_lookup)
       return if object.nil?
       action = object.new_record? ? :create : :update
+
+      # Fuzzy Search
+      if import_model.display_name == "Project" && params[:skip_fuzzy_search] != "1" && action == :create
+        projects = Project.fuzzy_name(object.full_name)
+        if projects.present?
+          @fuzzy_matches << { object: object, matches: projects, row: @current_row }
+          message = "#{projects.count} project#{projects.count > 1 ? "s" : ""} found with similar full name: #{object.full_name}"
+          report_warning(object, message)
+        end
+      end
 
       begin
         perform_model_callback(object, :before_import_associations, record)
@@ -137,6 +149,13 @@ module RailsAdminImport
       results[:error] << message
     end
 
+    def report_warning(object, warning)
+      object_label = import_model.label_for_model(object)
+      message = "#{warning} (row #{@current_row})"
+      logger.info "#{Time.now}: #{message}"
+      results[:warning] << message
+    end
+
     def report_general_error(error)
       message = I18n.t("admin.import.import_error.general", error: @current_row ? "#{error} (row #{@current_row})" : error)
       logger.info "#{Time.now}: #{message}"
@@ -146,8 +165,12 @@ module RailsAdminImport
     def format_results
       imported = results[:success]
       not_imported = results[:error]
+      warnings = results[:warning]
       unless imported.empty?
         results[:success_message] = format_result_message("successful", imported)
+      end
+      unless warnings.empty?
+        results[:warning_message] = "#{warnings.size} warning#{warnings.size > 1 ? "s" : ""}"
       end
       unless not_imported.empty?
         results[:error_message] = format_result_message("error", not_imported)
