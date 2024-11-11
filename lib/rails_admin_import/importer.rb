@@ -91,8 +91,9 @@ module RailsAdminImport
       action = object.new_record? ? :create : :update
 
       # Fuzzy Search
-      if import_model.display_name == "Project" && params[:skip_fuzzy_search] != "1" && action == :create
-        projects = Project.fuzzy_name(object.full_name)
+      if import_model.display_name == "Project" && params[:skip_fuzzy_search] != "1" && action == :create && record[:groups].present?
+        query_key = params[:associations]["groups"]
+        projects = Project.joins(:groups).where(groups: { query_key => record[:groups] }).fuzzy_name(object.full_name)
         if projects.present?
           @fuzzy_matches << { object: object, matches: projects, row: @current_row }
           message = "#{projects.count} project#{projects.count > 1 ? "s" : ""} found with similar full name: #{object.full_name}"
